@@ -384,14 +384,18 @@ abstract class SymfonyCnf
 					foreach($imports as $importFile)
 						if($importFile = SymfonyApp::getRootDir() .'/'. $importFile)
 							if(file_exists($importFile))
-								$replacement = array_merge($replacement, parse_ini_file($importFile, true));
+								$replacement = array_merge($replacement, parse_ini_file($importFile, false));
 											
 				foreach($replacement as $k => $v) {
 					$search[] 	= "%{$k}%";					
 					$replace[] 	= $v;
 				}
 			}
-			else 
+		}
+		
+		foreach ($cnfSections as $key => $section)
+		{
+			if($key != 'import') 
 			{				
 				// do the replacements from the import
 				$section = self::parseConfigReplacements($section, $search, $replace);
