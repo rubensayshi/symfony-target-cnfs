@@ -39,12 +39,19 @@ abstract class SymfonyCnf
 	static private $config;
 		
 	/**
-	 * storage for the actual config values, whereby the values are grouped as per the 
-	 * group headers defined in the ini file
+	 * storage for which keys belong in which section
 	 * 
 	 * @var 	array[string=>array]
 	 */
-	static private $config_section;
+	static private $section_keys;
+		
+	/**
+	 * tmp storage where we build up the sections content when they are requested
+	 * everything in here is by reference
+	 * 
+	 * @var 	array[string=>array]
+	 */
+	static private $section_config;
 	
 	/**
 	 * defines weither we've done an succesfull init
@@ -71,6 +78,7 @@ abstract class SymfonyCnf
 			);
 		
 			self::load();
+			
 			self::$init = true;
 		}
 	}
@@ -110,14 +118,24 @@ abstract class SymfonyCnf
 	 * returns a section of the config as defined by the given section name,
 	 * the section must exist otherwise an empty array is returned
 	 * 
-	 * @param 	string		$s_key	- config section name  
+	 * @param 	string		$section	- config section name  
 	 * @return	array
 	 */
-	static function getSection($s_key)
+	static function getSection($section)
 	{
 		self::init();
 		
-		return  isset(self::$config_section[$s_key]) ? self::$config_section[$s_key] : null;
+		if (!isset(self::$section_config[$section])) {
+			self::$section_config[$section] = array();
+		
+			$keys = isset(self::$section_keys[$section]) ? self::$section_keys[$section] : array();
+			
+			foreach ($keys as $key) {
+				self::$section_config[$section][$key] =& self::$config[$key];
+			}
+		}
+		
+		return self::$section_config[$section];
 	}
 		
 	/**
@@ -356,10 +374,13 @@ abstract class SymfonyCnf
 	static private function load()
 	{			
 		self::$config 			= array();
-		self::$config_section 	= array();		
+		self::$section_keys 	= array();		
 
-		foreach (self::$cnfFiles as $cnfFile) 
+		foreach (self::$cnfFiles as $cnfFile) {
 			if (strlen($cnfFile)) self::mergeSectionedConfigData( parse_ini_file($cnfFile, true) );
+		}
+		
+		self::doConfigReplacements();
 	}
 	
 	/**
@@ -377,63 +398,78 @@ abstract class SymfonyCnf
 		$search			= array();
 		$replace		= array();
 		
-		foreach ($cnfSections as $key => $section)
-		{
-			if($key == 'import') {
-				foreach($section as $imports)
-					foreach($imports as $importFile)
-						if($importFile = SymfonyApp::getRootDir() .'/'. $importFile)
-							if(file_exists($importFile))
-								$replacement = array_merge($replacement, parse_ini_file($importFile, false));
-											
-				foreach($replacement as $k => $v) {
-					$search[] 	= "%{$k}%";					
-					$replace[] 	= $v;
+		if (isset($cnfSections['import'])) {
+			foreach ($cnfSections['import'] as $imports) {
+				foreach ($imports as $importFile) {
+					if ($importFile = SymfonyApp::getRootDir() .'/'. $importFile) {
+						if (file_exists($importFile)) {
+							self::mergeSectionedConfigData( parse_ini_file($importFile, true) );
+						}
+					}
 				}
 			}
 		}
 		
-		foreach ($cnfSections as $key => $section)
-		{
-			if($key != 'import') 
-			{				
-				// do the replacements from the import
-				$section = self::parseConfigReplacements($section, $search, $replace);
+		foreach ($cnfSections as $key => $section) {
+			if ($key == 'import') {
+				continue;
+			}
+			
+			// an actual section - so concatenate
+			if (is_array($section)) { 
+				self::$config = $overwrite ? array_merge(self::$config, $section) : array_merge($section, self::$config);
 				
-				if (is_array($section)) { 
-					// an actual section - so concatenate
-					self::$config = $overwrite ? array_merge(self::$config, $section) : array_merge($section, self::$config);
-					
-					if (!isset(self::$config_section[ $key ])) {
-						self::$config_section[ $key ] = $section;
-					} else {
-						self::$config_section[ $key ] = $overwrite	? array_merge(self::$config_section[ $key ], $section)
-																	: array_merge($section, self::$config_section[ $key ])
-																	;
-					}
-					
-					
-				} else if (!is_numeric($key) && is_scalar($section)) {
-					// an ini setting (that falls outside any section) - add to array an remove from sectionsd
-					if ($overwrite || !isset(self::$config[$key]))				
-						self::$config[$key] = $section;				
+				$keys = array_keys($section);
+				
+				if (!isset(self::$section_keys[ $key ])) {
+					self::$section_keys[ $key ] = $keys;
+				} else {
+					self::$section_keys[ $key ] = $overwrite	? array_merge(self::$section_keys[ $key ], $keys)
+																: array_merge($keys, self::$section_keys[ $key ])
+																;
+				}
+				
+			// an ini setting (that falls outside any section) - add to array
+			} else if (!is_numeric($key) && is_scalar($section)) {
+				if ($overwrite || !isset(self::$config[$key])) {			
+					self::$config[$key] = $section;				
 				}
 			}
-		}	
+		}
+	}
+	
+	static private function doConfigReplacements()
+	{
+		$search 	= array();
+		$replace 	= array();
+		
+		foreach (self::$config as $key => $value) {
+			if ($value) {
+				$search[]	= "%{$key}%";
+				$replace[]	= $value;
+			}
+		}
+		
+		self::$config = self::parseConfigReplacements(self::$config, $search, $replace);
 	}
 	
 	static private function parseConfigReplacements($data, $search, $replace)
 	{
 		$array = is_array($data);
 		
-		if(!$array)
+		if (!$array)
 			$data = array($data);
 		
-		if(empty($search) || empty($replace))
+		if (empty($search) || empty($replace))
 			return $data;
 			
-		foreach($data as &$value)
-			$value = str_replace($search, $replace, $value);
+		foreach ($data as &$value) {
+			if (is_array($value)) {
+				$value = self::parseConfigReplacements($value, $search, $replace);
+			} else {
+				$value = str_replace($search, $replace, $value);
+			}
+		}
 		
 		return ($array ? $data : reset($data));
 	}
